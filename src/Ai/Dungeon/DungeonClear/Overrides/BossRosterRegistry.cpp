@@ -69,6 +69,7 @@ namespace
             RegisterUtgardePinnacleRoster(t);
             RegisterPitOfSaronRoster(t);
             RegisterHallsOfReflectionRoster(t);
+            RegisterCullingOfStratholmeRoster(t);
             return t;
         }();
         return kPatches;

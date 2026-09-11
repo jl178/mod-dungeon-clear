@@ -124,6 +124,20 @@ namespace
     // stalled at 3/5 plants). No candidate within the cap = "not loaded /
     // not spawned yet" -> keep walking to the anchor.
     constexpr float DC_EVENT_GO_ANCHOR_MATCH = 25.0f;
+    // UseItemAt arrival radius when the step doesn't override it. Tighter than a
+    // plain event MoveTo because the point of arriving is to be the nearest
+    // candidate for a spell that picks its own target by entry: the Culling of
+    // Stratholme's Grain Crate Helpers sit ON their crates and the nearest pair is
+    // 49yd apart, so 4yd leaves no ambiguity while staying comfortably inside
+    // spell 49590's own 8yd range.
+    constexpr float DC_EVENT_USEITEM_REACH = 4.0f;
+    // How close the step's RECEIPT gameobject must stand to the anchor to count as
+    // "this one is done". The receipt is summoned at the used object's exact
+    // position (the Plagued Grain Crate replaces the Suspicious one in place), so
+    // this only has to absorb the summon's own rounding — and must stay far below
+    // the spacing between two of the step's anchors, or crate N would latch on
+    // crate N-1's receipt. 5yd against a 49yd minimum spacing.
+    constexpr float DC_EVENT_USEITEM_LATCH = 5.0f;
     // How far out a Gossip step ACQUIRES its (unique) NPC in order to walk to it.
     // Deliberately wide: the freed crew can settle well beyond the gossip range
     // (the ZulFarrak crew descend to the temple floor), and the approach must
@@ -1160,6 +1174,95 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             return StepResult::Running;  // the lootState latch above confirms + advances
         }
 
+        case EventStepKind::UseItemAt:
+        {
+            // Use a quest item AT A PLACE and latch on the RECEIPT the mechanic
+            // leaves behind. The Culling of Stratholme's five plagued grain crates:
+            // item 37888 casts 49590, whose effect-0 implicit target is
+            // TARGET_UNIT_NEARBY_ENTRY narrowed by a spell-implicit-target condition
+            // to an alive Grain Crate Helper (27827) within 8yd — the invisible
+            // NOT_SELECTABLE trigger standing on the crate. Its SpellHit counts the
+            // crate, deletes the Suspicious Grain Crate (190094) and summons a
+            // Plagued Grain Crate (190095) in its place for a DAY.
+            //
+            // So, unlike UseItemOnGO, there is nothing to aim at and nothing whose
+            // lootState to watch: the cast is an ordinary self-targeted item use and
+            // the RECEIPT GO is the success latch. See the kind's note for why all
+            // three of those differences matter.
+            if (step.itemId == 0 || step.goEntry == 0)
+                return StepResult::Done;  // mis-authored step: loud in review, not a stall
+
+            float const reach = step.radius > 0.0f ? step.radius : DC_EVENT_USEITEM_REACH;
+
+            // 1. THE LATCH, FIRST AND ALWAYS. Checking before anything else is what
+            //    makes the step idempotent: a rewind, a re-entered instance or a
+            //    second Drive after a combat gap all re-run a crate that is already
+            //    done and must cost nothing but this scan. Anchor-relative (never
+            //    bot-relative) so crate N cannot latch on crate N-1's receipt.
+            {
+                std::list<GameObject*> receipts;
+                bot->GetGameObjectListWithEntryInGrid(receipts, step.goEntry, 80.0f);
+                for (GameObject* g : receipts)
+                    if (g && g->GetExactDist(step.x, step.y, step.z) <= DC_EVENT_USEITEM_LATCH)
+                        return StepResult::Done;
+            }
+
+            // 2. Walk in. The anchor is the object's own position, so "arrived" is a
+            //    plain distance test — no LOS clause, because unlike a barrel in a
+            //    house the crates stand in the open on the road and the spell picks
+            //    its own target (the engine applies its own LOS to that pick).
+            if (bot->GetExactDist(step.x, step.y, step.z) > reach)
+            {
+                HopTo(bot, step.x, step.y, step.z);
+                return StepResult::Running;
+            }
+
+            // 3. Grant the item. A bot never ran Chromie's questline, and on this
+            //    fork her gossip's grant (spell 49591, a spell_dbc row) is the only
+            //    other source — so the step must not depend on it having landed.
+            Item* item = bot->GetItemByEntry(step.itemId);
+            if (!item)
+            {
+                bot->AddItem(step.itemId, 1);
+                item = bot->GetItemByEntry(step.itemId);
+                if (!item)
+                    return StepResult::Running;  // bags full this tick — retry
+            }
+
+            // 4. WAIT OUT THE ITEM'S OWN COOLDOWN. 37888 carries a 10s
+            //    spellcooldown, and a cast refused by it is refused SILENTLY — the
+            //    step would otherwise spam one per tick and read, from the log, as a
+            //    crate that simply never counted. Walking 48-81yd between crates
+            //    usually covers the wait; this makes that an optimisation rather
+            //    than an assumption.
+            if (step.spellId && bot->HasSpellCooldown(step.spellId))
+                return StepResult::Running;
+
+            // The item use (an instant cast here, but never assume) is already in
+            // flight — let it finish rather than interrupting it every tick.
+            if (bot->IsNonMeleeSpellCast(false))
+                return StepResult::Running;
+
+            LOG_INFO("playerbots.dungeonclear",
+                     "[dungeon-clear] {} event-step UseItemAt: use item {} (spell {}) at "
+                     "({:.1f},{:.1f},{:.1f}), waiting on receipt GO {}",
+                     bot->GetName(), step.itemId, step.spellId, step.x, step.y, step.z,
+                     step.goEntry);
+            // A feral-form druid leader cannot cast an item's spell at all
+            // (CheckShapeshift rejects it before the spell is ever resolved), so it
+            // would sit here spam-casting for the whole step timeout. See DcFormGate.
+            DcFormGate::DropBlockingForm(bot, item);
+            SpellCastTargets targets;
+            // Self-targeted, exactly like the UseItem step. The spell needs no
+            // explicit target — TARGET_UNIT_NEARBY_ENTRY is resolved by the engine —
+            // and Spell::InitExplicitTargets drops a unit target the spell's
+            // explicit-target mask does not ask for, so this is simply the shape a
+            // real client's "use item on nothing" sends.
+            targets.SetUnitTarget(bot);
+            bot->CastItemUseSpell(item, targets, 0, 0);
+            return StepResult::Running;  // the receipt latch above confirms + advances
+        }
+
         default:
             // Not yet implemented. Blocked makes an accidentally authored step
             // stall visibly rather than silently pass.
@@ -1259,15 +1362,10 @@ EventDriveOutcome DungeonEventExecutor::Drive(Player* bot, AiObjectContext* cont
     prog.instanceId = instanceId;
 
     // (Re)initialise on a new event — self-heals a stale value from a prior run.
+    // BeginEvent owns WHICH clocks are re-based; see it for why the escort ones
+    // are among them.
     if (prog.eventId != ev.id)
-    {
-        prog.eventId = ev.id;
-        prog.stepIndex = 0;
-        prog.attempts = 0;
-        prog.stepStartMs = now;
-        prog.maxStepIndex = 0;
-        prog.progressMs = now;
-    }
+        prog.BeginEvent(ev.id, now);
     // A gap since the last drive means this is a FRESH activation — a new run /
     // re-enter, or the event lapsed (condition went false) and re-fired — NOT a
     // tick-to-tick continuation. Restart from step 0 so the whole chain (e.g.

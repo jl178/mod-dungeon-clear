@@ -131,4 +131,17 @@ void RegisterPitOfSaronHooks(ObjectiveHookRegistry::HookTable& out);
 // they share map 668's constants and its areatrigger forge with the controllers.
 void RegisterHallsOfReflectionHooks(ObjectiveHookRegistry::HookTable& out);
 
+// The Culling of Stratholme (map 595) — the ten-wave controller, and nothing else.
+// See CullingOfStratholmeDriver.cpp. Id 36.
+//
+// ONE hook for a whole dungeon is the point worth recording: nothing on map 595 is
+// started by an areatrigger (so no packet has to be forged the way Pit of Saron's
+// and Utgarde Pinnacle's do), every gossip on the critical path is reachable
+// through the declarative Gossip step or the escort driver's resume branch, and the
+// five crates are the new UseItemAt step. The waves are the single thing with no
+// declarative expression, because what they need is a standing preference
+// re-decided every tick rather than a sequence. Its arithmetic is in the pure
+// kernel Util/DcCosWaveDecision.h.
+void RegisterCullingOfStratholmeHooks(ObjectiveHookRegistry::HookTable& out);
+
 #endif

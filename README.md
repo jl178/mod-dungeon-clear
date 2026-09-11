@@ -116,7 +116,10 @@ Caverns, Uldaman, Sunken Temple, Razorfen Downs, Scarlet Monastery, Zul'Farrak,
 Blackrock Depths, Scholomance, Stratholme, and Dire Maul; and in Burning
 Crusade: Hellfire Ramparts, Blood Furnace, Shattered Halls, Slave Pens,
 Underbog, Steamvault, Sethekk Halls, Mechanar, Arcatraz, Black Morass, Old
-Hillsbrad, and Magisters' Terrace. Coverage continues to expand.
+Hillsbrad, and Magisters' Terrace; and in Wrath of the Lich King: Utgarde Keep,
+the Nexus, Azjol-Nerub, Ahn'kahet, Drak'Tharon Keep, the Violet Hold, Gundrak,
+Halls of Stone, Halls of Lightning, Utgarde Pinnacle, the Culling of Stratholme,
+Pit of Saron, and Halls of Reflection. Coverage continues to expand.
 
 Faction-specific events run only for the relevant side, and heroic-only events
 never fire on a normal run. If an event cannot complete (for example, a scripted

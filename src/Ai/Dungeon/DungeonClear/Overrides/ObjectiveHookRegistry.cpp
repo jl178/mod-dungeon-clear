@@ -821,6 +821,7 @@ namespace
             RegisterUtgardePinnacleHooks(t);
             RegisterPitOfSaronHooks(t);
             RegisterHallsOfReflectionHooks(t);
+            RegisterCullingOfStratholmeHooks(t);
             return t;
         }();
         return kHooks;

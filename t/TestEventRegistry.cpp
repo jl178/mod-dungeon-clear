@@ -310,6 +310,24 @@ namespace
             // leaves the map, so a driver that came back must re-arm from whatever
             // state it finds.
             {668, 5},
+            // The Culling of Stratholme "The ten waves of Stratholme": CosWavesDue is
+            // gated on GetData(DATA_ARTHAS_EVENT) being exactly 4 or 5, and on this map
+            // a counter test is a STRONGER near-gate than any distance check. The
+            // counter can only read 4 because the party performed, in this order,
+            // Chromie's entrance gossip, five Arcane Disruptor uses along 330yd of road,
+            // Chromie-middle's gossip 430yd further on, a three-minute escort to the
+            // city gate, a gossip there, and an 85-second city intro that ENDS with
+            // Arthas parked at waypoint 11 — ninety yards from the first wave cluster.
+            // There is no path to that value that leaves the party anywhere but in the
+            // city, and none of it can happen from a distance or by accident. It closes
+            // for ever at 6 (Salramm dead).
+            //
+            // Its lone step (hook 36, CosDriveWaves) OWNS the travel — it walks the
+            // leader to the live wave, which is the entire reason the event exists,
+            // because nothing on this map comes to the party — so an arrival step would
+            // add nothing, and Done is its "nothing to steer this tick" yield rather
+            // than a completion. Repeatable besides: a momentary Done latches nothing.
+            {595, 10},
         };
         for (Row const& r : kRows)
             if (r.mapId == mapId && r.eventId == eventId)
@@ -891,6 +909,18 @@ TEST(DungeonEventIntegrityTest, DrivesInCombatIsConfinedToVettedWaveEncounters)
         // optimisation here, it is the difference between the event existing and
         // not. It yields for most of every wall fight.
         {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme". THERE IS NO
+        // INTER-WAVE TIMER ON THIS MAP AT ALL: npc_arthasAI::SendNextWave summons
+        // the next four mobs in the SAME CALL as the previous wave's fourth death,
+        // so the party is in combat essentially without a break from wave 1 to
+        // Salramm, and the only gaps are the seconds it takes to walk between
+        // clusters. An out-of-combat-only rung would get the twenty seconds before
+        // wave 1 and essentially nothing afterwards — and the thing this driver
+        // exists to do happens entirely in those gaps, because the four spawn
+        // clusters are up to 264yd apart and the mobs have NO movement script.
+        // Note it yields the tick on every wave tick it is not steering, which is
+        // most of them, so the flag's usual cost is paid only while it is walking.
+        {595, 10},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())
@@ -1338,6 +1368,18 @@ TEST(DungeonEventIntegrityTest, StepsOwnMovementIsConfinedToVettedEvents)
         // fight — four summon batches totalling 831k-1.17M HP have to be killed by
         // a party whose leader is running a rung above the stock combat movers.
         {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme": hook 36 walks the
+        // tank up to 264yd, cluster to cluster, on its own long-range spline — the
+        // whole point of the event, because Arthas stops at waypoint 11 for the
+        // entire phase and the wave mobs have no movement script, so nothing comes
+        // to the party and a driver that only held would never fight. The per-tick
+        // hold runs BEFORE Drive, so without the flag last tick's spline is
+        // cancelled before the hook can see it. It is also what makes a Done RETURN
+        // YIELD, and on this map that is the half that decides fights: the driver
+        // has nothing to steer for the whole of every wave fight, and forty trash
+        // mobs plus two bosses have to be killed by a party whose leader is running
+        // a rung above the stock combat movers.
+        {595, 10},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())
@@ -2214,6 +2256,18 @@ TEST(DungeonEventIntegrityTest, PullOwningEventsAreVetted)
         // throws the victim further back still. The corridor has no static trash
         // on it either — every hostile is a summon the encounter spawns at him.
         {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme". The pull's Idle
+        // branch answers unplanned aggro by stamping a fresh camp BEHIND the tank
+        // and dragging it back until it finds ground clear of hostiles — and this
+        // phase is one long unplanned aggro across four clusters up to 264yd apart,
+        // so "backward" is always away from the wave the party has to kill and the
+        // wave counter only moves on deaths. Dropping the scout-lag with it is the
+        // other half: the tank walks INTO a 4-pack by design here, and a tank
+        // fifteen yards ahead of its party is the wrong shape for that. There is
+        // nothing to gain either — every hostile in the city during this phase is a
+        // wave summon (the static Risen Zombies are 250yd away in Fire Street,
+        // which belongs to the LAST objective of the dungeon).
+        {595, 10},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())

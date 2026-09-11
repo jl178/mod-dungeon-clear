@@ -73,6 +73,10 @@ enum class DcThrottle : uint8
     HorThroneLog,        // the throne-room gather / forge line
     HorEscapeGoLog,      // "not ready for the point of no return, because ..."
     HorStallWarn,        // the escape's "he is on her and the wall is still shut" WARN
+    CosWaveLog,          // the Culling of Stratholme wave driver's per-tick line
+                         // (its walk to the wave goes through DcTransit::TravelTo,
+                         //  which owns the TransitIssue floor above, so there is no
+                         //  movement slot of its own here)
     EscortResumeGossipLog,  // "the resume gossip left his gossip flag up" WARN
 
     // --- action floors (time only) -----------------------------------------

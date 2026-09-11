@@ -288,6 +288,26 @@ namespace DcEventDoorRegistry
             case 197341:  // the Arthas door (opens on Marwyn's death)
             case 197342:  // the door before the throne (spawned open, never scripted)
             case 201385:  // Ice Wall (SUMMONED at an Ice Wall Target; opens on WallCompleted)
+            // The Culling of Stratholme (map 595) — the two objects the instance
+            // owns. Both are GAMEOBJECT_TYPE_DOOR, both spawned shut, and neither
+            // is ever clickable by anybody:
+            //
+            //   188686 the TOWN HALL BOOKCASE, the secret passage to the last
+            //     third of the dungeon. Opened by exactly two lines of the core —
+            //     npc_arthasAI's waypoint-36 handler, and ReorderInstance for a
+            //     state at or past KILLED_EPOCH — and the intended flow is that
+            //     the party follows Arthas to it and he opens it. A bot Use()
+            //     would toggle the server state with the client still drawing it
+            //     shut, AND would do so while Arthas is still walking, which is the
+            //     one thing this event must not race. ALSO navigation-ignored
+            //     below; see the row there for why one row is not enough.
+            //
+            //   191788 the CITY ENTRANCE GATE (the exit). Opened only when the
+            //     counter reaches FINISHED, after Mal'ganis. Never on the critical
+            //     path — the run is over by then — so this row exists purely so a
+            //     stray door-blocked walk-in can never single it out.
+            case 188686:  // CoS — Town Hall bookcase (opens at Arthas's waypoint 36)
+            case 191788:  // CoS — City Entrance Gate (opens at PROGRESS_FINISHED)
                 return true;
             default:
                 return false;
@@ -418,6 +438,27 @@ namespace DcEventDoorRegistry
             // implies, and it holds even for the ticks BEFORE the intro phases
             // the sword out, when it is in phase and still unopenable.
             case 202302:  // Halls of Reflection — Frostmourne (the sword)
+            // The Culling of Stratholme (map 595) — the TOWN HALL BOOKCASE, and
+            // this is the Halls of Reflection Frostmourne lesson applied before it
+            // cost a run rather than after.
+            //
+            // 188686 at (2473.27, 1121.36, 149.96) is an interact-THROUGH gate in
+            // the fullest sense: the party's job at it is to have talked to Arthas
+            // forty yards earlier, and ARTHAS is what opens it — his waypoint-36
+            // handler, about six seconds after he walks up. So for those six
+            // seconds a shut TYPE_DOOR is standing directly on the party's path
+            // with the escort walking INTO it.
+            //
+            // IsScriptOnly alone does not cover that. It only stops the bot
+            // CLICKING the door; the blocking-door value still flags it, and the
+            // auto-pause underneath that is what ends the run — in front of a door
+            // that is about to open on its own. A paused run then cannot drive the
+            // event that would open it, which is the same deadlock shape nine
+            // Blackwing Lair runs died of at Chromaggus's cage.
+            //
+            // So it needs BOTH rows, and the reason it needs both is the reason
+            // Thrall's prison door and the Chromaggus portcullis do.
+            case 188686:  // CoS — Town Hall bookcase (Arthas opens it at waypoint 36)
                 return true;
             // The Violet Hold (map 608) — the six Activation Crystals. Like the
             // Steamvault access panels these are wall CONTROLS, not doors, but

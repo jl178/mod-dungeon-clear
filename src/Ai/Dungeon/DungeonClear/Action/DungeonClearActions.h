@@ -164,6 +164,22 @@ protected:
     // through to Drive and RunStep fires the GO.
     bool DriveUseItemOnGO(EventStep const& step);
 
+    // Drive a UseItemAt step's APPROACH (the Culling of Stratholme's five plagued
+    // grain crates, 48-81yd apart along 330yd of road). Owns the tick (returns
+    // true) while walking the tank to the step's anchor through the DC movement
+    // system, for the same reason the UseItemOnGO driver does: the at-objective
+    // StopBot(Hold) runs BEFORE Drive and cancels a plain MovePoint spline every
+    // tick, so RunStep's own HopTo alone would stutter-walk the road one tick of
+    // movement at a time. Returns false once the tank is inside the step's arrival
+    // radius (or the receipt GO is already standing), so the caller falls through
+    // to Drive and RunStep uses the item / latches.
+    //
+    // Simpler than the UseItemOnGO driver by exactly the things the crates do not
+    // need: no target GO, so no LOS/doorway detour and no forced-destination
+    // walk-in — every crate stands in the open on the road, and the spell finds its
+    // own target within 8yd rather than range-checking an interact box.
+    bool DriveUseItemAt(EventStep const& step);
+
     // Recovery verdict for a long non-combat set-piece (the Old Hillsbrad barrel
     // run). The objective drive owns the tick at DcRel::AtObjective (30), which
     // sits ABOVE the NeedsRest triggers (26.5) — so without an explicit yield the

@@ -3806,6 +3806,520 @@ namespace DcHallsOfReflection
 // and the conditional escape driver. See HallsOfReflectionEvents.cpp.
 void RegisterHallsOfReflectionEvents(std::vector<DungeonEvent>& out);
 
+// --- The Culling of Stratholme (map 595) ----------------------------------
+//
+// Greenfield before this block: map 595 had no roster, no events and no route,
+// and every run died at setup with "no boss roster for this map". The reason is
+// worth stating once, because it is also why the objectives below are objectives
+// and not bosses: ALL FOUR of this dungeon's encounters are script TempSummons
+// with NO `creature` spawn row anywhere on the map, so BossSpawnIndex's
+// instance_encounters -> spawn join emits nothing at all.
+//
+// The DBC data itself is complete and correct — DungeonEncounter rows 293-296
+// (normal) / 297-300 (heroic) give bits 0 Meathook, 1 Salramm, 2 Epoch,
+// 3 Mal'ganis, and Mal'ganis's cast-spell credit (58630) exists as a spell_dbc
+// row so ObjectMgr really does stamp it SPELL_ATTR0_CU_ENCOUNTER_REWARD. So
+// 0xF IS the expected final encounterMask on a fully cleared run even though
+// the roster carries no boss rows: the bits are flipped by the kills the
+// objectives' events perform.
+//
+// THE WHOLE DUNGEON IS ONE MONOTONIC COUNTER. GetData(DATA_ARTHAS_EVENT) climbs
+// 0 -> 11 and never regresses (an Arthas death repositions him to the current
+// value's checkpoint and re-arms his gossip; it does not roll the counter back),
+// which is what makes every gate here a >= test — the safe shape, because the
+// event engine is dormant in combat and a transient "boss is up" window can be
+// missed outright.
+//
+// AND EVERY PLAYER ACTION IS ONE OF THREE THINGS: a gossip click gated on that
+// counter, five item uses, or a kill. Nothing in this instance keys on player
+// position and there is not one areatrigger on the critical path — so, unlike
+// Pit of Saron or Utgarde Pinnacle, no hook here has to forge a packet.
+namespace DcCullingOfStratholme
+{
+    constexpr uint32 MAP_ID = 595;
+
+    // --- instance data slots, HAND-COPIED from culling_of_stratholme.h -------
+    //
+    // `enum Data` is a plain unnumbered enum, so these are the values the compiler
+    // assigns, transcribed. Never hand-count it again:
+    //
+    //   DATA_ARTHAS_EVENT 0 · DATA_GUARDIANTIME_EVENT 1 · DATA_SHOW_CRATES 2
+    //   DATA_CRATE_COUNT 3 · DATA_START_WAVES 4 · DATA_SHOW_INFINITE_TIMER 5
+    //   DATA_ARTHAS_REPOSITION 6 · DATA_INTRO_EVENT_FINISHED 7
+    //
+    // Only the first two are READ here. The rest are setters the instance script
+    // owns and a bot must never touch — DATA_CRATE_COUNT in particular is a bare
+    // increment with no idempotence (`_crateCount++`), so a second SetData from
+    // outside the helper's SpellHit would miscount the crates.
+    constexpr uint32 DATA_ARTHAS_EVENT = 0;
+    // The heroic bonus timer, in MILLISECONDS REMAINING — not a state id. Set to
+    // 26 minutes when DATA_START_WAVES fires on a heroic run, counted down in
+    // InstanceScript::Update, and zeroed both when the Infinite Corruptor dies and
+    // when it expires. So `> 0` is exactly "the bonus is still winnable", which is
+    // the only probe the heroic objective needs.
+    constexpr uint32 DATA_GUARDIANTIME_EVENT = 1;
+
+    // --- DATA_ARTHAS_EVENT values (enum ArthasPhase) ------------------------
+    constexpr uint32 PROGRESS_NOT_STARTED         = 0;
+    constexpr uint32 PROGRESS_CRATES_FOUND        = 1;   // 5th crate hit
+    constexpr uint32 PROGRESS_START_INTRO         = 2;   // Chromie-middle gossip
+    constexpr uint32 PROGRESS_FINISHED_INTRO      = 3;   // Arthas at WP8, gossip up
+    constexpr uint32 PROGRESS_FINISHED_CITY_INTRO = 4;   // city RP done; waves in 20s
+    constexpr uint32 PROGRESS_KILLED_MEATHOOK     = 5;   // wave 5 dead
+    constexpr uint32 PROGRESS_KILLED_SALRAMM      = 6;   // wave 10 dead
+    constexpr uint32 PROGRESS_REACHED_TOWN_HALL   = 7;   // Arthas at WP20, gossip up
+    constexpr uint32 PROGRESS_KILLED_EPOCH        = 8;   // Epoch dead, Arthas idle
+    constexpr uint32 PROGRESS_LAST_CITY           = 9;   // Arthas at WP45, gossip up
+    constexpr uint32 PROGRESS_BEFORE_MALGANIS     = 10;  // Arthas at WP54, gossip up
+    constexpr uint32 PROGRESS_FINISHED            = 11;  // Mal'ganis done, exit open
+
+    // --- creatures ----------------------------------------------------------
+    //
+    // ARTHAS IS THE ESCORT AND HE IS NOT THE WAILING CAVERNS SHAPE. Faction 2076
+    // (friendly to players; the Scourge attacks him), no immunities, HealthModifier
+    // 3.5, self-heals below 40%, and — this is the load-bearing difference — his
+    // npc_escortAI is started WITHOUT a player GUID, so there is no 100yd
+    // player-distance despawn the way Thrall has one.
+    //
+    // He therefore never takes the escort driver's START branch, which requires the
+    // idle faction 35. Everything on this map runs through the RESUME branch
+    // instead: he raises UNIT_NPC_FLAG_GOSSIP at five checkpoints (WP8, WP20, WP31,
+    // WP45, WP54), the driver walks to 5yd and selects option 0, and his script
+    // advances the counter and clears the flag. Exactly the Thrall model, minus the
+    // opening release.
+    constexpr uint32 NPC_ARTHAS = 26499;
+    // The heroic Arthas template (HealthModifier 5.0). Named so nobody "fixes" the
+    // escort by adding it: GetEntry() stays 26499 on both difficulties — 31210 is a
+    // separate template the map does not spawn — so every scan here is 26499 only.
+    constexpr uint32 NPC_ARTHAS_HEROIC = 31210;
+
+    // The two Chromies, and they are DIFFERENT CREATURES with different scripts.
+    // 26527 stands at the entrance from map load (gossip menu 9586) and hands out
+    // the Arcane Disruptor; 27915 does not exist until the instance SUMMONS her
+    // 20 seconds after the fifth crate (menu 9610), and her gossip is the only
+    // thing that starts the escort.
+    constexpr uint32 NPC_CHROMIE_START  = 26527;
+    constexpr uint32 NPC_CHROMIE_MIDDLE = 27915;
+
+    // The invisible trigger the crate spell actually hits: NOT_SELECTABLE, faction
+    // 35, flags_extra TRIGGER, one standing on each of the five crates. Its
+    // SpellHit is what counts the crate, so the item use has to land on IT and not
+    // on the gameobject. See EventStepKind::UseItemAt.
+    constexpr uint32 NPC_CRATE_HELPER = 27827;
+
+    // The four encounters. None has a spawn row; all are TempSummons (spawnId 0),
+    // which is both why the roster is objectives-only and what makes the wave
+    // census below safe — see COS_WAVE_* .
+    constexpr uint32 NPC_MEATHOOK = 26529;
+    constexpr uint32 NPC_SALRAMM  = 26530;
+    constexpr uint32 NPC_EPOCH    = 26532;
+    constexpr uint32 NPC_MALGANIS = 26533;
+
+    constexpr uint32 BIT_MEATHOOK = 0;
+    constexpr uint32 BIT_SALRAMM  = 1;
+    constexpr uint32 BIT_EPOCH    = 2;
+    constexpr uint32 BIT_MALGANIS = 3;
+
+    // The HEROIC bonus boss and his two props. 32273 is summoned at
+    // EventPos[EVENT_SRC_CORRUPTOR] the moment DATA_START_WAVES fires on a heroic
+    // run — the same tick wave 1 spawns — and is attackable immediately (faction
+    // 1720, unit_flags 0x40 only: no immunity, no NON_ATTACKABLE, no arming
+    // window, unlike Epoch and Mal'ganis).
+    //
+    // WHERE HE STANDS IS THE WHOLE REASON THE LAST ESCORT LEG IS SPLIT IN TWO, and
+    // the straight-line distance is a trap. He is 81 yards from Market Row — and
+    // 927 yards from it ON FOOT. Measured on the real mmtiles
+    // (t/TestCullingOfStratholmeRouteProbe.cpp):
+    //
+    //     Arthas WP54 (pre-Mal'ganis)  ->  143 yd
+    //     Fire Street WP48             ->  379 yd
+    //     Market Row                   ->  927 yd
+    //     King's Square                -> 1139 yd
+    //     Arthas WP11 (waves start)    -> 1223 yd
+    //     Elders' Square               -> 1255 yd
+    //
+    // He is in the MARKET DISTRICT, which the city does not connect to from the
+    // wave streets at all: the only route is the one the dungeon intends — through
+    // the Town Hall, down the secret passage, along Fire Street and round the
+    // Market. So the only place he can be killed without walking the whole dungeon
+    // twice is the PROGRESS_BEFORE_MALGANIS pause at waypoint 54, where Arthas
+    // stands with his gossip up and waits indefinitely. That is where objective 8
+    // sits, and it is why objective 7 ends at BEFORE_MALGANIS instead of running
+    // straight on into Mal'ganis.
+    //
+    // THE CONSEQUENCE FOR THE CLOCK, stated plainly so nobody triages it as a bug:
+    // the 26-minute timer starts at wave 1, and reaching waypoint 54 takes 21-28
+    // minutes (10-15 of waves, ~1 to the Town Hall, 5-7 for the Town Hall and
+    // Epoch, ~5 for the passage and Fire Street). So the bonus is winnable on a
+    // fast run and gone on a slow one, which is what a time-attack bonus is. When
+    // it is gone he has despawned, and the event's Optional gate turns that into a
+    // skipped objective rather than a stalled run.
+    //
+    // His Time Rift (28409) is NOT_SELECTABLE + IMMUNE_TO_PC and his Guardian of
+    // Time (32281) is faction 35, so neither needs a never-target row: the
+    // attacker scans reject both on their own.
+    constexpr uint32 NPC_INFINITE_CORRUPTOR = 32273;
+    constexpr uint32 NPC_GUARDIAN_OF_TIME   = 32281;
+    constexpr uint32 NPC_TIME_RIFT          = 28409;
+
+    // --- the ten waves ------------------------------------------------------
+    //
+    // Eight spawn tables of four, cycled by npc_arthasAI::SummonNextWave with
+    // `tableId = waveGroupId > 4 ? waveGroupId - 1 : waveGroupId` — so the ten
+    // waves are tables 0,1,2,3, MEATHOOK, 4,5,6,7, SALRAMM, and the two bosses
+    // spawn at Market Row where tables 2 and 5 also are.
+    //
+    // THERE IS NO INTER-WAVE TIMER. SummonedCreatureDies -> SendNextWave summons
+    // the next wave in the SAME CALL as the fourth death, so the census below is
+    // essentially never empty between waves and the party is in combat
+    // continuously from wave 1 to Salramm. That is the single most important fact
+    // about this phase: there is no breathing space in it anywhere, which is why
+    // the driver's rest rung has to fire with a wave standing alive (they never
+    // come to you) and why the two wave objectives are bookkeeping rather than
+    // navigation.
+    constexpr uint32 NPC_RISEN_ZOMBIE        = 27737;
+    constexpr uint32 NPC_DEVOURING_GHOUL     = 28249;
+    constexpr uint32 NPC_DARK_NECROMANCER    = 28200;
+    constexpr uint32 NPC_TOMB_STALKER        = 28199;
+    constexpr uint32 NPC_CRYPT_FIEND         = 27734;
+    constexpr uint32 NPC_BILE_GOLEM          = 28201;
+    constexpr uint32 NPC_ENRAGING_GHOUL      = 27729;
+    constexpr uint32 NPC_PATCHWORK_CONSTRUCT = 27736;
+
+    // The four spawn clusters, as centroids of their tables. Documentation and
+    // test anchors only — the driver never walks to one of these. It walks to a
+    // LIVE MOB's own position, for a reason the probe measured: the geometric
+    // centre of the four clusters (2245, 1270) has NO navmesh at city height, only
+    // map 595's flat z=0.14 sheet, and this map is one of the twelve where a
+    // destination with no navmesh poly resolves to that sheet — a ~130yd sink.
+    // A live summon's position is standable by construction.
+    constexpr float CLUSTER_KS_X = 2174.4f, CLUSTER_KS_Y = 1253.1f, CLUSTER_KS_Z = 135.4f;
+    constexpr float CLUSTER_FL_X = 2256.3f, CLUSTER_FL_Y = 1160.5f, CLUSTER_FL_Z = 138.2f;
+    constexpr float CLUSTER_MR_X = 2350.0f, CLUSTER_MR_Y = 1199.0f, CLUSTER_MR_Z = 130.5f;
+    constexpr float CLUSTER_ES_X = 2138.5f, CLUSTER_ES_Y = 1357.3f, CLUSTER_ES_Z = 132.1f;
+
+    // --- gameobjects --------------------------------------------------------
+    //
+    // The crate PAIR is the UseItemAt mechanic: the helper's SpellHit Delete()s the
+    // Suspicious crate and SummonGameObject()s a Plagued one in its place for a
+    // DAY, carrying the sniffed rotation over. So the Plagued crate is a stable
+    // per-crate receipt and the Suspicious one is gone — which is why the step
+    // latches on the former's presence rather than on the latter's state.
+    constexpr uint32 GO_SUSPICIOUS_CRATE = 190094;
+    constexpr uint32 GO_PLAGUED_CRATE    = 190095;
+
+    // The Town Hall bookcase (the secret passage) and the exit gate. Both are in
+    // DcEventDoorRegistry — see the rows there for why the bookcase needs BOTH
+    // IsScriptOnly and IsNavigationIgnored.
+    constexpr uint32 GO_SHKAF_GATE = 188686;
+    constexpr uint32 GO_EXIT_GATE  = 191788;
+
+    // --- the Arcane Disruptor ----------------------------------------------
+    //
+    // Item 37888 casts 49590 on use. Three properties the crate step depends on:
+    //
+    //   * Map 595 in item_template, so granting it is scoped to this instance and
+    //     CheckItems refuses it anywhere else;
+    //   * spellcharges 0 and maxcount 1 — it is NOT consumed, so one grant serves
+    //     all five crates;
+    //   * spellcooldown 10000. The step waits that out rather than spam-casting
+    //     through it, because a cooldown refusal is silent.
+    //
+    // And 49590's own shape: effect 0 is an APPLY_AURA whose implicit target is
+    // TARGET_UNIT_NEARBY_ENTRY with SpellRange 137 (8 yards), narrowed by a
+    // CONDITION_SOURCE_TYPE_SPELL_IMPLICIT_TARGET row to an ALIVE creature 27827.
+    // So the engine finds the crate helper itself and the cast needs no target of
+    // ours at all.
+    constexpr uint32 ITEM_ARCANE_DISRUPTOR  = 37888;
+    constexpr uint32 SPELL_ARCANE_DISRUPTION = 49590;
+
+    // --- event / objective ids ----------------------------------------------
+    //
+    // One scale: event N is anchored on OBJ(N) with orderOverride N, for N in
+    // 1..9. Event 10 is the conditional wave driver and has no objective.
+    //
+    // EIGHT IS A GAP ON A NORMAL RUN. The Infinite Corruptor's objective and event
+    // are both HeroicOnly (he does not exist on normal), so a normal roster sorts
+    // 1..7 then 9 — which is fine, because orderOverride is a sort key and nothing
+    // requires it to be dense.
+    constexpr uint32 EVENT_CRATES      = 1;
+    constexpr uint32 EVENT_START_RP    = 2;
+    constexpr uint32 EVENT_CITY_GATE   = 3;
+    constexpr uint32 EVENT_MEATHOOK    = 4;
+    constexpr uint32 EVENT_SALRAMM     = 5;
+    constexpr uint32 EVENT_TOWN_HALL   = 6;
+    constexpr uint32 EVENT_FIRE_STREET = 7;
+    constexpr uint32 EVENT_CORRUPTOR   = 8;   // heroic only
+    constexpr uint32 EVENT_MALGANIS    = 9;
+    constexpr uint32 EVENT_WAVES       = 10;  // conditional driver, no objective
+
+    constexpr uint32 ORDER_CRATES      = 1;
+    constexpr uint32 ORDER_START_RP    = 2;
+    constexpr uint32 ORDER_CITY_GATE   = 3;
+    constexpr uint32 ORDER_MEATHOOK    = 4;
+    constexpr uint32 ORDER_SALRAMM     = 5;
+    constexpr uint32 ORDER_TOWN_HALL   = 6;
+    constexpr uint32 ORDER_FIRE_STREET = 7;
+    constexpr uint32 ORDER_CORRUPTOR   = 8;
+    constexpr uint32 ORDER_MALGANIS    = 9;
+
+    // ObjectiveHookRegistry id for the wave controller. Ids are ONE FLAT SPACE
+    // across every dungeon; 36 follows Halls of Reflection's 31-35.
+    constexpr uint32 HOOK_COS_WAVES = 36;
+
+    // --- anchors ------------------------------------------------------------
+    //
+    // Every one of these is probed on the real mmtiles by
+    // t/TestCullingOfStratholmeRouteProbe.cpp, and on this map that is not a
+    // formality: map 595 carries a flat navmesh sheet at z = 0.14 under most of
+    // the city, so an anchor written a few yards off a walkable surface does not
+    // fail loudly — it resolves 130 yards down.
+
+    // Chromie at the entrance. Her own spawn; the gossip reach is 20yd so the
+    // arrive radius only has to put the tank in the same part of the road.
+    constexpr float CHROMIE_X = 1550.08f, CHROMIE_Y = 574.41f, CHROMIE_Z = 92.79f;
+    constexpr float CHROMIE_ARRIVE = 8.0f;
+
+    // Chromie-middle's SUMMON position (EventPos[EVENT_POS_CHROMIE]). The anchor
+    // sits on top of it, which is what makes WaitForSpawn's 250yd scan trivially
+    // correct here.
+    constexpr float CHROMIE_MID_X = 1813.30f, CHROMIE_MID_Y = 1283.58f, CHROMIE_MID_Z = 142.33f;
+    constexpr float CHROMIE_MID_ARRIVE = 10.0f;
+
+    // Arthas's waypoint 0, at the bridge. NOT his spawn (1920.87, 1287.12), which
+    // is 18yd further east: the anchor is where the escort BEGINS, so the party
+    // forms up on his path rather than on top of him.
+    constexpr float BRIDGE_X = 1903.17f, BRIDGE_Y = 1291.57f, BRIDGE_Z = 143.32f;
+    constexpr float BRIDGE_ARRIVE = 12.0f;
+
+    // Market Row / Town Hall front — EventPos[EVENT_SRC_MEATHOOK], which is also
+    // EventPos[EVENT_SRC_SALRAMM]: the two bosses spawn on the same spot. Both
+    // wave objectives anchor here because it is where the party is standing when
+    // each of them completes.
+    constexpr float MARKET_ROW_X = 2351.45f, MARKET_ROW_Y = 1197.81f, MARKET_ROW_Z = 130.45f;
+    constexpr float MARKET_ROW_ARRIVE = 12.0f;
+
+    // The heroic Corruptor's summon position (EventPos[EVENT_SRC_CORRUPTOR]). 81yd
+    // from Market Row in a straight line and 927yd from it on foot — see the
+    // NPC_INFINITE_CORRUPTOR note above for the measured table and for why that is
+    // what positions objective 8. The number that matters here is 143yd: the walk
+    // from Arthas's waypoint 54, which is the objective before it.
+    //
+    // Also the reason he never interferes with the waves: the nearest wave cluster
+    // is 81yd away in a straight line and the whole Market district is a separate
+    // component of the street graph, so neither the wave driver nor a wave mob ever
+    // meets him.
+    constexpr float CORRUPTOR_X = 2329.07f, CORRUPTOR_Y = 1276.98f, CORRUPTOR_Z = 132.68f;
+    constexpr float CORRUPTOR_ARRIVE = 12.0f;
+
+    // Arthas's waypoint 20, the Town Hall door, where he stops with gossip up at
+    // PROGRESS_REACHED_TOWN_HALL.
+    constexpr float TOWN_HALL_X = 2365.63f, TOWN_HALL_Y = 1194.84f, TOWN_HALL_Z = 131.97f;
+    constexpr float TOWN_HALL_ARRIVE = 10.0f;
+
+    // Arthas's waypoint 16, on the road between his wave stop and the Town Hall,
+    // and where the Town Hall leg is anchored. THE ANCHOR IS A MEETING POINT ON HIS
+    // ROUTE — not the start of it and not the end of it — and on this leg that is
+    // not a stylistic choice. Both mistakes have now been made live, in that order.
+    //
+    // THE CONSTRAINT. Arthas is a DB spawn (creature guid 1970935), so he is not a
+    // TempSummon and npc_escortAI never marks him active. Creature::IsUpdateNeeded
+    // therefore keeps him ticking only while a player is inside the map's grid
+    // activation range, which on an instance is Visibility.Distance.Instances =
+    // 170yd. Both wave bosses spawn at Market Row, so that is where the wave phase
+    // leaves the party — 265yd east of his WP11 stop, with him asleep.
+    //
+    // MISTAKE ONE, anchoring at the Town Hall door (tp-20260909-224741-1, 0/10).
+    // The party garrisoned at the door and waited for DATA_ARTHAS_EVENT to reach
+    // REACHED_TOWN_HALL. It never did: at that range he was never updated, so the
+    // 10s timer that unpauses him after Salramm never ran. Ten runs read
+    // `data(0)=6 (need >= 7)` until the watchdog ended them.
+    //
+    // MISTAKE TWO, anchoring at WP12, his first step out of the wave stop
+    // (tp-20260910-073710-1, 0/10). The reasoning was that the party must walk back
+    // and collect him. It does — but WP12 is where he LEAVES from, and he does not
+    // wait to be collected. ACTION_KILLED_SALRAMM schedules a 10s resume
+    // (culling_of_stratholme.cpp), and the party's own westward walk is what wakes
+    // him: they cross into range around WP17, the overdue timer fires at once, and
+    // he runs east on WP13..WP20 while they keep walking west. They pass each other
+    // on the road. Every run arrived at an empty anchor, found no escortee inside
+    // ESCORT_SEARCH, and held there until the run timed out — which is what the
+    // player sees as the party running back to the city gate and milling about the
+    // wave ground.
+    //
+    // WP16 IS THE POINT THAT SATISFIES BOTH ENDS. It is 137yd from his WP11 stop,
+    // inside the 170yd activation range, so arriving there wakes him exactly as
+    // WP12 did. And it is 156yd from the Town Hall door, so the whole of his
+    // WP12..WP20 run lies inside ESCORT_SEARCH_TOWN_HALL below — the escort step
+    // latches onto him wherever the head start left him, instead of requiring the
+    // party to be somewhere before he is. It is the easternmost of his waypoints
+    // that keeps the wake-up: WP17 is 181yd from WP11 and would not.
+    constexpr float TOWN_HALL_MEET_X = 2210.39f, TOWN_HALL_MEET_Y = 1207.55f,
+                    TOWN_HALL_MEET_Z = 136.26f;
+    constexpr float TOWN_HALL_MEET_ARRIVE = 12.0f;
+
+    // Arthas's waypoint 31, where he waits with gossip up after Epoch dies — the
+    // start of the secret passage and Fire Street leg.
+    constexpr float PASSAGE_X = 2423.12f, PASSAGE_Y = 1119.43f, PASSAGE_Z = 148.08f;
+    constexpr float PASSAGE_ARRIVE = 12.0f;
+
+    // Arthas's waypoint 54, at the edge of the Market, where he stops with his
+    // gossip up at PROGRESS_BEFORE_MALGANIS and waits indefinitely for someone to
+    // say "I'm ready to battle the dreadlord, sire."
+    //
+    // THAT INDEFINITE WAIT IS WHAT MAKES THE HEROIC BONUS POSSIBLE. It is the only
+    // pause in the run that is both unbounded and 143 yards from the Infinite
+    // Corruptor, so objective 8 can detour to him and come back without anything
+    // being on a clock except the Corruptor's own.
+    constexpr float MARKET_X = 2327.39f, MARKET_Y = 1412.47f, MARKET_Z = 127.69f;
+    constexpr float MARKET_ARRIVE = 10.0f;
+
+    // --- the five crates, in road order from Chromie -----------------------
+    //
+    // Gameobject positions (the helper on each stands within 0.2yd of it). Legs
+    // are 49 / 62 / 81 / 60 yards, all on the main road, and the NEAREST PAIR IS
+    // 49yd APART — which is what makes the step's 5yd receipt latch and 4yd
+    // arrival radius unambiguous. Order is irrelevant to the instance (any five
+    // distinct helpers count); this order is simply the walk.
+    struct CratePos { float x, y, z; };
+    inline constexpr CratePos CRATES[5] = {
+        { 1579.42f, 621.45f,  99.73f },  // guid 67580 — Roger Owens
+        { 1570.92f, 669.93f, 102.31f },  // guid 67579 — Silvio Perelli's stock
+        { 1629.68f, 731.37f, 112.85f },  // guid 67582 — Martha Goslin's grain
+        { 1628.98f, 812.14f, 120.69f },  // guid 67583 — Malcolm Moore's house
+        { 1674.39f, 872.31f, 120.39f },  // guid 67581 — Bartleby Battson's cart
+    };
+
+    // --- the wave driver's tuning ------------------------------------------
+
+    // Census radius from the tank. MR <-> ES is 264yd — the widest pair of
+    // clusters — so this has to clear it from either end. Cheap in practice: it is
+    // only run while the predicate holds, and every wave is summoned into a grid
+    // the summon itself loads.
+    constexpr float WAVE_SCAN = 320.0f;
+
+    // How close to the nearest live wave mob counts as "at the wave". Above this
+    // the driver travels; below it, it either yields to the fight or breaks a
+    // standoff. The TravelTo leash is deliberately well under it so there is no
+    // dead band between "travel" and "arrived" — the two tests are on the same
+    // metric (3D distance to the mob) and the leash is the tighter one.
+    constexpr float WAVE_ENGAGE_RANGE = 25.0f;
+    constexpr float WAVE_TRAVEL_LEASH = 15.0f;
+
+    // How long a live wave mob may stand inside WAVE_ENGAGE_RANGE with nobody in
+    // combat before the driver starts the fight itself. Pit of Saron's budget: its
+    // waves proved that a parked party and a parked mob can stand eight yards
+    // apart indefinitely, because AC aggro is relocation-driven and neither side
+    // is relocating. These mobs are ordinary REACT_AGGRESSIVE trash with ~20yd
+    // detection, so this should never fire — it costs nothing if it does not.
+    constexpr uint32 WAVE_STANDOFF_MS = 5000;
+
+    // Do not REST with a live wave mob nearer than this. Rest has to be allowed
+    // while a wave is alive (there is no gap between waves at all — see the wave
+    // note above), so the only safeguard is distance: sit down well outside
+    // anything's detection radius.
+    constexpr float WAVE_REST_SAFE_DIST = 40.0f;
+
+    // How long ONE rest window may last before the driver stops waiting and walks
+    // to the wave anyway.
+    //
+    // The bound is the point. `partyRecovered` is a predicate the party can fail
+    // for ever — a bot out of water, a member the rez ladder cannot reach, a rest
+    // target above what drinking delivers — and an unbounded hold on it stops the
+    // dungeon dead in a gap between waves with every watchdog reporting a healthy
+    // party standing still. Two minutes is several times what drinking back to the
+    // stock HighMana threshold takes, and the clock is cleared by combat, so a
+    // party that is merely slow gets a fresh budget after every fight.
+    constexpr uint32 WAVE_REST_BUDGET_MS = 120000;
+
+    // Throttle on the driver's per-tick telemetry line.
+    constexpr uint32 TELEMETRY_MS = 3000;
+
+    // --- step timeouts ------------------------------------------------------
+    //
+    // One per step that can legitimately sit for minutes, each sized off the
+    // measured segment rather than the 30s default.
+
+    // Per crate. Old Hillsbrad's barrels measured 32-51s for a walk-in plus a
+    // plant and still needed 120s once guards and rest holds were in the way;
+    // these legs are comparable (49-81yd) and additionally carry the Disruptor's
+    // 10s cooldown, so they get the same budget.
+    constexpr uint32 CRATE_TIMEOUT_MS = 120000;
+
+    // Chromie-middle is summoned 20s after the fifth crate. 90s is the loud
+    // failure for a crate count that came up short — which is exactly the
+    // self-validation Old Hillsbrad gets from waiting on Lieutenant Drake.
+    constexpr uint32 CHROMIE_MID_TIMEOUT_MS = 90000;
+
+    // The two wave objectives are pure bookkeeping holds on the counter, and the
+    // thing they wait for is the whole wave phase: 10-15 minutes of fighting
+    // driven by event 9. 30 minutes is the "something is badly wrong" line.
+    constexpr uint32 WAVE_HOLD_TIMEOUT_MS = 1800000;
+
+    // The heroic Corruptor. The objective's anchor IS his summon position, so if he
+    // is there at all he is found on the first tick — which means this budget is
+    // only ever spent in the OTHER case, where the 26-minute timer expired and the
+    // instance despawned him. Kept short for exactly that reason: a missed bonus
+    // should cost the run twenty seconds, not a minute.
+    constexpr uint32 CORRUPTOR_SPAWN_TIMEOUT_MS = 20000;
+    constexpr uint32 CORRUPTOR_KILL_TIMEOUT_MS  = 300000;
+
+    // The wave driver's Custom step. The phase is 10-15 minutes and the event is
+    // Repeatable + Optional, so this is a RE-ARM rather than a skip: a timeout
+    // reports Skipped, the repeatable event is never latched, and
+    // DcRunEventAction rewinds it and carries on. 20 minutes keeps the re-arm
+    // rare without ever being the thing that ends a run.
+    constexpr uint32 WAVES_TIMEOUT_MS = 1200000;
+
+    // The escort steps carry NO flat timeout (DungeonEventExecutor::Advance
+    // exempts EscortCreature outright — its own dead-air watchdog owns liveness),
+    // which is the only reason the 3-minute Uther/Jaina intro and the 85-second
+    // city intro do not have to be budgeted here.
+
+    // --- escort geometry ----------------------------------------------------
+    //
+    // Shared by the three escort legs. The standoff is the module default; the
+    // threat radii differ per leg and are set at each call site, because what is
+    // worth engaging near Arthas changes completely between the city gate (where a
+    // cosmetic IMMUNE_TO_PC Mal'ganis stands 27yd from his stop) and the Town Hall
+    // (where Chrono-Lord Epoch spawns 40yd out and walks in).
+    constexpr float ESCORT_STANDOFF  = 5.0f;
+    constexpr float ESCORT_Z_BAND    = 20.0f;
+    constexpr float ESCORT_SEARCH    = 150.0f;
+    // The Town Hall leg searches wider than the rest. It is the one leg whose
+    // escortee is ALREADY MOVING when the step starts: he resumes on a 10s timer
+    // after Salramm and runs the 275yd from WP12 to WP20 whether or not the party
+    // has arrived, and loot, rests and stragglers make the party's own walk to the
+    // anchor anything from 3 to 30+ seconds. 200yd covers his entire possible
+    // range from the WP16 anchor (156yd at the far end, the Town Hall door), so
+    // there is no head start that can lose him. Every other leg starts on a
+    // stationary escortee and 150yd is ample.
+    constexpr float ESCORT_SEARCH_TOWN_HALL = 200.0f;
+    constexpr float ESCORT_THREAT_CITY      = 20.0f;
+    constexpr float ESCORT_THREAT_TOWN_HALL = 40.0f;
+    constexpr float ESCORT_THREAT_LAST_CITY = 30.0f;
+}
+
+// The Culling of Stratholme (595) — TEN events: Chromie and the five plagued
+// crates, the gossip that starts the Royal Escort, FOUR Arthas escort legs, two
+// wave-objective holds, the heroic Infinite Corruptor, and the conditional wave
+// controller that owns the party for the ten waves. See
+// CullingOfStratholmeEvents.cpp.
+void RegisterCullingOfStratholmeEvents(std::vector<DungeonEvent>& out);
+
+// Every creature entry the wave census counts: the eight trash entries plus the
+// two wave bosses.
+//
+// IT MUST STAY COMPLETE AND THE spawnId FILTER IS NOT OPTIONAL. Three of these
+// entries ALSO have static spawns on map 595 — 103 Risen Zombies and 7 Enraging
+// Ghouls line Fire Street, and two Crypt Fiends stand with them — and the
+// Stratholme citizens UpdateEntry into Risen Zombies during the city intro. Every
+// one of those keeps a non-zero GetSpawnId(); every wave member is a TempSummon
+// with spawnId 0. Counting a static one would read "the wave is up" from the
+// moment Fire Street is in scan range and send the party 250 yards the wrong way,
+// into a gauntlet that is three objectives ahead of them.
+std::vector<uint32> const& CosWaveEntries();
+
 
 // Every TempSummon the siege can field — the trash, the elites, the three portal
 // keepers, Ichoron's globules, Xevozz's spheres and Cyanigosa. Probed by
@@ -3914,6 +4428,23 @@ void RegisterPitOfSaronRoster(std::vector<BossRosterPatch>& t);
 // shape) and anchored at the END of the escape path, so that when the escape
 // driver is not running nothing walks the party TO the Lich King.
 void RegisterHallsOfReflectionRoster(std::vector<BossRosterPatch>& t);
+
+// The Culling of Stratholme (595) — EIGHT objectives and NO boss rows, plus a
+// second HeroicOnly patch for the Infinite Corruptor's ninth.
+//
+// Nothing here repairs a derivation, because there is nothing to repair: all four
+// encounters are script TempSummons with no `creature` row anywhere on map 595, so
+// BossSpawnIndex emits an EMPTY list and every run before this one failed at setup
+// with "no boss roster for this map". The objectives ARE the clear.
+//
+// They are objectives rather than MakeBossWithBit rows even though every bit
+// exists, and that is the Old Hillsbrad decision rather than a limitation: an
+// independently navigable boss anchor would have the clear walk the party AT
+// Meathook's spawn point while the escort is still three hundred yards back with
+// Arthas, and at Mal'ganis while Arthas is mid-cutscene. The kills happen INSIDE
+// the escort and wave events, and the bits flip from those kills exactly as they
+// would from any other.
+void RegisterCullingOfStratholmeRoster(std::vector<BossRosterPatch>& t);
 
 // --- wing layouts (one appender per split map) ---------------------------
 // Records which boss credit-entries belong to which wing of a multi-wing map;

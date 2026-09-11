@@ -137,6 +137,45 @@ enum class EventStepKind : uint8
                              // barrels are hit as five DISTINCT GOs. Done once the GO
                              // leaves GO_READY (the landed plant Uses the goober — a
                              // stable per-GO success latch, idempotent across restarts).
+    UseItemAt,               // USE a quest item AT A PLACE: walk to (x,y,z), then USE
+                             // `itemId` (granting it first if the bags lack it) via the
+                             // full item-use cast path, and latch Done once the GO
+                             // `goEntry` — the mechanic's own RECEIPT object — exists
+                             // within DC_EVENT_USEITEM_LATCH of the anchor.
+                             //
+                             // The Culling of Stratholme's five plagued grain crates
+                             // (item 37888 Arcane Disruptor, spell 49590 Arcane
+                             // Disruption, receipt GO 190095 Plagued Grain Crate) are
+                             // what this exists for, and each of its three differences
+                             // from UseItemOnGO is load-bearing there:
+                             //
+                             //   * THE SPELL HITS A CREATURE, NOT THE GO. 49590's
+                             //     effect-0 implicit target is TARGET_UNIT_NEARBY_ENTRY
+                             //     (38) with an 8yd range, narrowed by a
+                             //     CONDITION_SOURCE_TYPE_SPELL_IMPLICIT_TARGET row to
+                             //     an ALIVE creature 27827 (Grain Crate Helper) — the
+                             //     invisible NOT_SELECTABLE trigger standing on each
+                             //     crate, whose SpellHit does the counting. So there is
+                             //     no GO to target and no lock to open: the cast is a
+                             //     plain self-targeted item use and the engine finds the
+                             //     helper. UseItemOnGO's SetGOTarget would be wrong.
+                             //   * THE RECEIPT IS A DIFFERENT OBJECT FROM THE THING
+                             //     USED. The helper's SpellHit deletes the Suspicious
+                             //     Grain Crate (190094) and summons a Plagued Grain
+                             //     Crate (190095) in its place for a DAY, so "190095
+                             //     stands here" is a stable per-crate "this one is
+                             //     done" — idempotent across an event restart, a rewind
+                             //     and a re-entered instance. UseItemOnGO's lootState
+                             //     latch has nothing to read, because the GO it would
+                             //     have latched on no longer exists.
+                             //   * THE ITEM HAS A COOLDOWN. 37888 carries a 10s
+                             //     spellcooldown, so the step has to WAIT it out
+                             //     between crates rather than spam-cast through it.
+                             //     Walking the 48-81yd road legs usually covers it,
+                             //     but the step never assumes so.
+                             //
+                             // `spellId` is the item's use-spell, kept (as in
+                             // UseItemOnGO) for the cooldown probe and the log line.
 };
 
 // One typed primitive. Fields are a shared bag — only those relevant to `kind`
@@ -673,6 +712,23 @@ public:
     // the barrel is walled off, and force-walks the final un-meshed yards.
     EventBuilder& UseItemOnGO(uint32 itemId, uint32 spellId, uint32 goEntry,
                               float x, float y, float z, float radius = 0.0f);
+    // Use a quest item AT a place (see EventStepKind::UseItemAt): walk to (x,y,z),
+    // wait out the item's own cooldown, then USE `itemId` there (granting it first
+    // if the bags lack it; `spellId` is its use-spell, used for the cooldown probe
+    // and the log). `receiptGoEntry` is the GO the mechanic leaves BEHIND on
+    // success — the step latches Done once one stands within
+    // DC_EVENT_USEITEM_LATCH of the anchor, which makes it idempotent across
+    // rewinds and a re-entered instance.
+    //
+    // Argument order deliberately mirrors UseItemOnGO, but the GO means the
+    // opposite thing: there it is the TARGET of the cast, here it is the RECEIPT
+    // for a cast that targets a creature the engine picks itself.
+    //
+    // `radius` is the ARRIVAL radius (0 => DC_EVENT_USEITEM_REACH). It is not a
+    // cast range — the spell's own range does that job — so it only has to be
+    // tight enough that the intended trigger is the nearest candidate.
+    EventBuilder& UseItemAt(uint32 itemId, uint32 spellId, uint32 receiptGoEntry,
+                            float x, float y, float z, float radius = 0.0f);
     // Drop the party down a narrow vertical hole (see EventStepKind::DropInHole).
     // (overX,overY,overZ) is the over-hole nudge target the leader glides to (a
     // point whose column is open straight to the deep floor — NOT the lip, whose

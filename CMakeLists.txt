@@ -15,6 +15,19 @@
 
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src")
 
+# New files added: Data/Events/CullingOfStratholmeEvents.cpp,
+#   Overrides/CullingOfStratholmeDriver.cpp, Util/DcCosWaveDecision.h
+#   (The Culling of Stratholme, map 595 — greenfield before this: no roster, no
+#    events, and every run failing at setup with "no boss roster for this map",
+#    because all four encounters are script TempSummons with no `creature` row for
+#    BossSpawnIndex's join to find. Seven objectives plus a HEROIC eighth for the
+#    Infinite Corruptor; three Arthas escort legs driven entirely off the monotonic
+#    DATA_ARTHAS_EVENT counter and his gossip flag; and one conditional controller
+#    for the ten waves, whose four spawn clusters are up to 264yd apart with no
+#    movement script, so the party must be walked to each of them. Also adds the
+#    UseItemAt event step for the five plagued grain crates — see
+#    Data/DungeonEventRegistry.h.)
+
 AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 
 # New files added: Util/DcDungeonAccess.{h,cpp}

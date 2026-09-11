@@ -50,6 +50,9 @@ TEST(BossRosterRegistryTest, HasPatchOnlyForPatchedMaps)
     EXPECT_TRUE(BossRosterRegistry::HasPatch(546));   // Underbog — drop objective
     EXPECT_TRUE(BossRosterRegistry::HasPatch(576));   // The Nexus — sphere objectives
     EXPECT_TRUE(BossRosterRegistry::HasPatch(600));   // Drak'Tharon Keep — the cast-spell-credit boss
+    EXPECT_TRUE(BossRosterRegistry::HasPatch(595));   // Culling of Stratholme — objectives-only
+                                                      // (the derived list is EMPTY: all four
+                                                      // encounters are script TempSummons)
     EXPECT_FALSE(BossRosterRegistry::HasPatch(0));
     EXPECT_FALSE(BossRosterRegistry::HasPatch(34));   // Stockades — no patch
 }

@@ -375,6 +375,34 @@ struct DcRunState
     // is walked back onto the add it left.
     bool   horFollowAdvancing = false;
 
+    // --- The Culling of Stratholme: the ten waves (map 595) ------------------
+    //
+    // ONE CLOCK AND ONE STATE ID, which is all this phase needs — and the reason
+    // it needs so much less than Pit of Saron or Halls of Reflection is worth
+    // recording: the counter it drives off is MONOTONIC with exactly two values in
+    // the window, so there is no wipe to detect, no restart to orchestrate and no
+    // phase to re-stamp clocks against.
+    //
+    // cosWaveStandoffMs runs ONLY while a live wave mob stands inside engage range
+    // with nobody in combat. That is the one shape on this map that can deadlock
+    // forever (a parked party and a parked mob, neither relocating, so neither
+    // ever takes an aggro check), and the clock is what bounds it. Cleared by the
+    // kernel in every other shape, so the budget is always measured from the
+    // current silence.
+    uint8  cosWaveState = 0;         // DcCosWaves::State last logged
+    uint32 cosWaveStateMs = 0;       // getMSTime() it was entered
+    uint32 cosWaveStandoffMs = 0;    // when the current silence began (0 = not silent)
+    uint32 cosWaveRestMs = 0;        // ...and when the current rest window opened,
+                                     // which bounds it: a party that can never top
+                                     // off must not be able to hold the phase for
+                                     // ever (see WAVE_REST_BUDGET_MS)
+    uint32 cosWaveRestSpentMs = 0;   // futile rest banked from windows that already
+                                     // CLOSED with the party still short. The budget
+                                     // is measured across the phase, not per window,
+                                     // so an interrupting wave fight can no longer
+                                     // hand a stuck party a fresh full one; only
+                                     // actually recovering clears it.
+
     // --- per-bot throttles (see Util/DcThrottle.h) --------------------------
 
     DcThrottleSlot throttles[kDcThrottleCount]{};
@@ -473,6 +501,20 @@ struct DcRunState
         ClearThrottle(DcThrottle::HorThroneLog);
         ClearThrottle(DcThrottle::HorEscapeGoLog);
         ClearThrottle(DcThrottle::HorStallWarn);
+    }
+
+    // Drop the Culling of Stratholme block. Called from the run teardown for the
+    // reason every other driver block is: the wave event is Repeatable, so a run
+    // that came back holding a spent standoff clock would open its pull budget on
+    // a silence that ended ten minutes ago.
+    void ClearCos()
+    {
+        cosWaveState = 0;
+        cosWaveStateMs = 0;
+        cosWaveStandoffMs = 0;
+        cosWaveRestMs = 0;
+        cosWaveRestSpentMs = 0;
+        ClearThrottle(DcThrottle::CosWaveLog);
     }
 
     void ClearTransit()
