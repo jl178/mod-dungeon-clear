@@ -1461,6 +1461,32 @@ bool DungeonClearEngageActionBase::DriveEscortCreature(EventStep const& step,
                            escortee->GetName());
             return true;
         }
+        // AND "LANDED" MEANS THE FLAG IS GONE, not that the packet went out.
+        // SelectGossip reports that it sent a select, which is a weaker claim: a
+        // select can land on an option that opens ANOTHER menu instead of firing
+        // the action, and the escortee keeps his gossip flag. This branch is
+        // entered only while that flag is up, so a flag that survives the call is
+        // a click that did not resume anything — and stamping progress for it
+        // reproduced the exact invisibility the note above describes, one dungeon
+        // later: Culling of Stratholme's Arthas re-clicked ~4x/second for ten
+        // minutes with every watchdog clear (tp-20260910-083410-1, 10/10 runs).
+        // Every scripted resume gossip DC drives clears the flag on the option
+        // that fires its DoAction (Arthas, Old Hillsbrad's Thrall), so this is a
+        // reliable receipt rather than a heuristic.
+        if (escortee->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP))
+        {
+            if (!DcRun::Of(botAI).Throttled(DcThrottle::EscortResumeGossipLog, 10000))
+            {
+                LOG_WARN("playerbots.dungeonclear",
+                         "[dungeon-clear] {}: the resume gossip on {} (option {}) left "
+                         "his gossip flag up — the select did not reach the option that "
+                         "resumes him; not counting it as progress",
+                         bot->GetName(), escortee->GetName(), step.gossipOption);
+            }
+            EscortWatchdog(botAI, context, prog, now, /*keepingUp*/ false,
+                           escortee->GetName());
+            return true;
+        }
         LOG_INFO("playerbots.dungeonclear",
                  "[dungeon-clear] {} resumed the escort of {} at a checkpoint "
                  "(gossip option {})",

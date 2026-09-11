@@ -398,10 +398,11 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
         bot->GetSession()->HandleGossipSelectOptionOpcode(select);
     };
 
-    // Capture the id BEFORE selecting: the select rebuilds PlayerTalkClass's menu
-    // in place (opening a submenu), so `menu.GetMenuId()` would already read the
-    // submenu's id afterward.
+    // Capture the id AND the option's action BEFORE selecting: the select rebuilds
+    // PlayerTalkClass's menu in place (opening a submenu), so reading either
+    // afterward would already describe the submenu.
     uint32 lastMenuId = menu.GetMenuId();
+    uint32 lastAction = menu.GetMenuItemAction(gossipListId);
     sendSelect(lastMenuId, gossipListId);
 
     // DRILL DOWN through submenus: some scripted NPCs put the option that fires
@@ -409,20 +410,46 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
     // post-Skarloc: menu 7830 -> 7829 -> 7831, and only 7831's option triggers his
     // DoAction). A single select would just open the next submenu into
     // PlayerTalkClass and never reach the terminal option — so keep selecting
-    // option 0 of whatever menu is now open until it CLOSES (the terminal select
-    // ClearGossipMenuFor's it). Bounded, and bails if the menu stops changing, so a
-    // self-referential menu can't loop. A plain single-level gossip (the common
-    // case) closes on the first select and skips the loop entirely.
+    // option 0 of whatever menu is now open until the gossip ENDS. Bounded, and
+    // bails if the menu stops changing, so a self-referential menu can't loop. A
+    // plain single-level gossip (the common case) ends on the first select and
+    // skips the loop entirely.
+    //
+    // "A NEW SUBMENU OPENED" IS NOT A MENU-ID CHANGE. GossipMenu::_menuId is only
+    // ever written by Player::PrepareGossipMenu — the DB-driven path. A menu built
+    // in C++ with AddGossipItemFor + SendGossipMenuFor (SendGossipMenuFor takes an
+    // npcText id, not a menu id) leaves _menuId at whatever it already was, so a
+    // C++ submenu reads back with the SAME id as its parent and the old
+    // `GetMenuId() == lastMenuId` guard broke out before the terminal click ever
+    // went out. That is exactly Culling of Stratholme's Arthas at the Town Hall:
+    // menu 13125's one option runs GOSSIP_ACTION_INFO_DEF+2, which re-sends menu
+    // 13126, and only 13126's option fires ACTION_START_TOWN_HALL. Click 1 landed,
+    // the drill-down bailed, his gossip flag survived, and the escort driver
+    // re-clicked option 1 of the same menu ~4x/second for the rest of the run —
+    // 2305 clicks in tr-20260910-083416-9, 10/10 runs of tp-20260910-083410-1.
+    //
+    // So compare the OPTION's action as well as the menu id: a scripted submenu
+    // keeps the id and changes the action (DEF+2 -> DEF+3), a DB submenu changes
+    // the id, and a menu that re-sends itself unchanged matches on both and stops
+    // the loop. Sender-GUID emptiness is checked first because CloseGossipMenuFor
+    // clears it without clearing the items — several scripts (Arthas included)
+    // close without a ClearGossipMenuFor, so an item-count test alone would keep
+    // drilling into a menu the core has already stopped accepting selects for.
     for (int guard = 0; guard < 6; ++guard)
     {
         GossipMenu& sub = bot->PlayerTalkClass->GetGossipMenu();
+        if (sub.GetSenderGUID().IsEmpty())
+            break;  // the terminal option fired and closed the gossip
         uint32 subListId = 0;
         if (!ResolveGossipListId(sub, 0, subListId))
-            break;  // menu closed -> the terminal option fired
-        if (sub.GetMenuId() == lastMenuId)
+            break;  // menu emptied -> nothing left to select
+        uint32 const subMenuId = sub.GetMenuId();
+        uint32 const subAction = sub.GetMenuItemAction(subListId);
+        if (subMenuId == lastMenuId && subAction == lastAction)
             break;  // no new submenu opened -> nothing more to drill
-        lastMenuId = sub.GetMenuId();
-        sendSelect(sub.GetMenuId(), subListId);
+        lastMenuId = subMenuId;
+        lastAction = subAction;
+        sendSelect(subMenuId, subListId);
     }
     return true;
 }

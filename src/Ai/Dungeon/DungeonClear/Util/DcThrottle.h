@@ -73,6 +73,7 @@ enum class DcThrottle : uint8
     HorThroneLog,        // the throne-room gather / forge line
     HorEscapeGoLog,      // "not ready for the point of no return, because ..."
     HorStallWarn,        // the escape's "he is on her and the wall is still shut" WARN
+    EscortResumeGossipLog,  // "the resume gossip left his gossip flag up" WARN
 
     // --- action floors (time only) -----------------------------------------
     UpHarpoonFire,       // floor between two Harpoon Launcher clicks (its own
